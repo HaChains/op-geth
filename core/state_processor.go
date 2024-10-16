@@ -19,6 +19,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -55,6 +56,10 @@ func NewStateProcessor(config *params.ChainConfig, chain *HeaderChain) *StatePro
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
+	return p.ProcessWithHooks(block, statedb, cfg, nil)
+}
+
+func (p *StateProcessor) ProcessWithHooks(block *types.Block, statedb *state.StateDB, cfg vm.Config, hooks []*tracing.Hooks) (types.Receipts, []*types.Log, uint64, error) {
 	var (
 		receipts    types.Receipts
 		usedGas     = new(uint64)
@@ -81,6 +86,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		if hooks != nil {
+			vmenv.Config.Tracer = hooks[i]
+		}
 		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)

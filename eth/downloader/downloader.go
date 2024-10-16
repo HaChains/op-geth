@@ -18,6 +18,7 @@
 package downloader
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -29,10 +30,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
+	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/kclients/tracecache"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
@@ -184,6 +188,8 @@ type BlockChain interface {
 
 	// InsertChain inserts a batch of blocks into the local chain.
 	InsertChain(types.Blocks) (int, error)
+
+	InsertChainWithHooks(chain types.Blocks, hooks []*tracing.Hooks) (int, error)
 
 	// InsertReceiptChain inserts a batch of receipts into the local chain.
 	InsertReceiptChain(types.Blocks, []types.Receipts, uint64) (int, error)
@@ -745,6 +751,13 @@ func (d *Downloader) processFullSyncContent() error {
 	}
 }
 
+// txTraceResult is the result of a single transaction trace.
+type txTraceResult struct {
+	TxHash common.Hash `json:"txHash"`           // transaction hash
+	Result interface{} `json:"result,omitempty"` // Trace results produced by the tracer
+	Error  string      `json:"error,omitempty"`  // Trace failure produced by the tracer
+}
+
 func (d *Downloader) importBlockResults(results []*fetchResult) error {
 	// Check for any early termination requests
 	if len(results) == 0 {
@@ -768,7 +781,40 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 	// Downloaded blocks are always regarded as trusted after the
 	// transition. Because the downloaded chain is guided by the
 	// consensus-layer.
-	if index, err := d.blockchain.InsertChain(blocks); err != nil {
+	var (
+		err   error
+		index int
+	)
+	for i, block := range blocks {
+		tracerSlice := make([]*tracers.Tracer, len(block.Transactions()))
+		hooks := make([]*tracing.Hooks, len(block.Transactions()))
+		for j := 0; j < len(block.Transactions()); j++ {
+			tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
+			hooks[j] = tracerSlice[j].Hooks
+		}
+		if _, err = d.blockchain.InsertChainWithHooks([]*types.Block{block}, hooks); err != nil {
+			index = i
+			break
+		} else {
+			traceResults := make([]txTraceResult, 0, len(tracerSlice))
+			for j, tracer := range tracerSlice {
+				traceResult, err := tracer.GetResult()
+				if err != nil {
+					log.Error("### DEBUG ### importBlockResults Tracer.GetResult", "err", err)
+				}
+				traceResults = append(traceResults, txTraceResult{
+					TxHash: block.Transactions()[j].Hash(),
+					Result: traceResult,
+				})
+			}
+			data, err := json.Marshal(traceResults)
+			if err != nil {
+				log.Error("### DEBUG ### importBlockResults json.Marshal", "err", err)
+			}
+			tracecache.Write(block.Number().Int64(), data)
+		}
+	}
+	if err != nil {
 		if index < len(results) {
 			log.Debug("Downloaded item processing failed", "number", results[index].Header.Number, "hash", results[index].Header.Hash(), "err", err)
 
