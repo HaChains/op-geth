@@ -46,7 +46,7 @@ import (
 )
 
 // TriesInMemory represents the number of layers that are kept in RAM.
-const TriesInMemory = 128
+const TriesInMemory = 1024
 
 type revision struct {
 	id           int
