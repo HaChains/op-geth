@@ -681,7 +681,7 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 var prepareTokens = make(chan struct{}, 8)
 
 func PrepareTraceResults(tracerSlice []*tracers.Tracer, block *types.Block) {
-	log.Info("### DEBUG ### PrepareTraceResults", "block", block.NumberU64(), "trace cache prepare concurrency", len(prepareTokens))
+	log.Info("### DEBUG ### PrepareTraceResults", "block", block.NumberU64(), "concurrency", fmt.Sprintf("%d/%d", len(prepareTokens), cap(prepareTokens)))
 	<-prepareTokens
 	traceResults := make([]txTraceResult, 0, len(tracerSlice))
 	for j, tracer := range tracerSlice {

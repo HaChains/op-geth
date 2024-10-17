@@ -151,12 +151,6 @@ var (
 	ErrInvalidRedisCacheKey      = errors.New("invalid redis cache key")
 )
 
-// txTraceResult is the result of a single transaction trace.
-type txTraceResult struct {
-	Result interface{} `json:"result,omitempty"` // Trace results produced by the tracer
-	Error  string      `json:"error,omitempty"`  // Trace failure produced by the tracer
-}
-
 func Write(blockNumber int64, traceResult []byte) {
 	if !Started() {
 		log.Info("### DEBUG ### [rediscache.Write] write before service start", "blockNumber", blockNumber)
