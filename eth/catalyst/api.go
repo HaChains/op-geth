@@ -18,8 +18,12 @@
 package catalyst
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/ethereum/go-ethereum/kclients/tracecache"
 	"strconv"
 	"sync"
 	"time"
@@ -535,6 +539,13 @@ func (api *ConsensusAPI) NewPayloadV3(params engine.ExecutableData, versionedHas
 	return api.newPayload(params, versionedHashes, beaconRoot)
 }
 
+// txTraceResult is the result of a single transaction trace.
+type txTraceResult struct {
+	TxHash common.Hash `json:"txHash"`           // transaction hash
+	Result interface{} `json:"result,omitempty"` // Trace results produced by the tracer
+	Error  string      `json:"error,omitempty"`  // Trace failure produced by the tracer
+}
+
 func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash) (engine.PayloadStatusV1, error) {
 	// The locking here is, strictly, not required. Without these locks, this can happen:
 	//
@@ -642,7 +653,14 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 		return engine.PayloadStatusV1{Status: engine.ACCEPTED}, nil
 	}
 	log.Trace("Inserting block without sethead", "hash", block.Hash(), "number", block.Number())
-	if err := api.eth.BlockChain().InsertBlockWithoutSetHead(block); err != nil {
+
+	tracerSlice := make([]*tracers.Tracer, len(block.Transactions()))
+	hooks := make([]*tracing.Hooks, len(block.Transactions()))
+	for j := 0; j < len(block.Transactions()); j++ {
+		tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
+		hooks[j] = tracerSlice[j].Hooks
+	}
+	if err := api.eth.BlockChain().InsertBlockWithoutSetHeadWithHooks(block, hooks); err != nil {
 		log.Warn("NewPayloadV1: inserting block failed", "error", err)
 
 		api.invalidLock.Lock()
@@ -651,6 +669,23 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 		api.invalidLock.Unlock()
 
 		return api.invalid(err, parent.Header()), nil
+	} else {
+		traceResults := make([]txTraceResult, 0, len(tracerSlice))
+		for j, tracer := range tracerSlice {
+			traceResult, err := tracer.GetResult()
+			if err != nil {
+				log.Error("### DEBUG ### importBlockResults Tracer.GetResult", "err", err)
+			}
+			traceResults = append(traceResults, txTraceResult{
+				TxHash: block.Transactions()[j].Hash(),
+				Result: traceResult,
+			})
+		}
+		data, err := json.Marshal(traceResults)
+		if err != nil {
+			log.Error("### DEBUG ### importBlockResults json.Marshal", "err", err)
+		}
+		tracecache.Write(block.Number().Int64(), data)
 	}
 	hash := block.Hash()
 	return engine.PayloadStatusV1{Status: engine.VALID, LatestValidHash: &hash}, nil
