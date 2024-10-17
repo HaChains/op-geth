@@ -670,25 +670,35 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 
 		return api.invalid(err, parent.Header()), nil
 	} else {
-		traceResults := make([]txTraceResult, 0, len(tracerSlice))
-		for j, tracer := range tracerSlice {
-			traceResult, err := tracer.GetResult()
-			if err != nil {
-				log.Error("### DEBUG ### importBlockResults Tracer.GetResult", "err", err)
-			}
-			traceResults = append(traceResults, txTraceResult{
-				TxHash: block.Transactions()[j].Hash(),
-				Result: traceResult,
-			})
-		}
-		data, err := json.Marshal(traceResults)
-		if err != nil {
-			log.Error("### DEBUG ### importBlockResults json.Marshal", "err", err)
-		}
-		tracecache.Write(block.Number().Int64(), data)
+		prepareTokens <- struct{}{}
+		go PrepareTraceResults(tracerSlice, block)
 	}
 	hash := block.Hash()
 	return engine.PayloadStatusV1{Status: engine.VALID, LatestValidHash: &hash}, nil
+}
+
+// prepareTokens is a semaphore to limit the number of concurrent trace result writing preparation
+var prepareTokens = make(chan struct{}, 8)
+
+func PrepareTraceResults(tracerSlice []*tracers.Tracer, block *types.Block) {
+	log.Info("### DEBUG ### PrepareTraceResults", "block", block.NumberU64(), "trace cache prepare concurrency", len(prepareTokens))
+	<-prepareTokens
+	traceResults := make([]txTraceResult, 0, len(tracerSlice))
+	for j, tracer := range tracerSlice {
+		traceResult, err := tracer.GetResult()
+		if err != nil {
+			log.Error("### DEBUG ### importBlockResults Tracer.GetResult", "err", err)
+		}
+		traceResults = append(traceResults, txTraceResult{
+			TxHash: block.Transactions()[j].Hash(),
+			Result: traceResult,
+		})
+	}
+	data, err := json.Marshal(traceResults)
+	if err != nil {
+		log.Error("### DEBUG ### importBlockResults json.Marshal", "err", err)
+	}
+	tracecache.Write(block.Number().Int64(), data)
 }
 
 // delayPayloadImport stashes the given block away for import at a later time,
