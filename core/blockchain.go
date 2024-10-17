@@ -1601,6 +1601,8 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 	return bc.InsertChainWithHooks(chain, nil)
 }
+
+// InsertChainWithHooks 每次只塞了一个块，所以hooks是一维的
 func (bc *BlockChain) InsertChainWithHooks(chain types.Blocks, hooks []*tracing.Hooks) (int, error) {
 	// Sanity check that we have something meaningful to import
 	if len(chain) == 0 {
@@ -2397,19 +2399,23 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Block) error {
 	return nil
 }
 
+func (bc *BlockChain) InsertBlockWithoutSetHeadWithHooks(block *types.Block, hooks []*tracing.Hooks) error {
+	if !bc.chainmu.TryLock() {
+		return errChainStopped
+	}
+	defer bc.chainmu.Unlock()
+
+	_, err := bc.insertChain(types.Blocks{block}, false, hooks)
+	return err
+}
+
 // InsertBlockWithoutSetHead executes the block, runs the necessary verification
 // upon it and then persist the block and the associate state into the database.
 // The key difference between the InsertChain is it won't do the canonical chain
 // updating. It relies on the additional SetCanonical call to finalize the entire
 // procedure.
 func (bc *BlockChain) InsertBlockWithoutSetHead(block *types.Block) error {
-	if !bc.chainmu.TryLock() {
-		return errChainStopped
-	}
-	defer bc.chainmu.Unlock()
-
-	_, err := bc.insertChain(types.Blocks{block}, false, nil)
-	return err
+	return bc.InsertBlockWithoutSetHeadWithHooks(block, nil)
 }
 
 // SetCanonical rewinds the chain to set the new head block as the specified
