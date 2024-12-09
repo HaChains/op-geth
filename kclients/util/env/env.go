@@ -29,12 +29,27 @@ const (
 	EnvTraceCacheDB       = "TRACE_CACHE_DB"
 	EnvTraceCacheSize     = "TRACE_CACHE_SIZE"
 	EnvTraceCacheChanSize = "TRACE_CACHE_CHAN_SIZE"
+	EnvTraceCacheEnabled  = "TRACE_CACHE_ENABLED"
 )
 
 const (
 	WrongInt   = -1024
 	DefaultInt = 0
 )
+
+func LoadEnvBool(v string) bool {
+	env := os.Getenv(v)
+	if env != "" {
+		b, err := strconv.ParseBool(env)
+		if err != nil {
+			sig.Int(fmt.Sprintf("failed to parse '%s' of value '%s'\n", v, env))
+			return false
+		}
+		return b
+	}
+	log.Info("### DEBUG ### Load ENV", "name", v, "use default value", false)
+	return false
+}
 
 func LoadEnvInt64(v string) int64 {
 	env := os.Getenv(v)

@@ -786,16 +786,22 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 		index int
 	)
 	for i, block := range blocks {
-		tracerSlice := make([]*tracers.Tracer, len(block.Transactions()))
-		hooks := make([]*tracing.Hooks, len(block.Transactions()))
-		for j := 0; j < len(block.Transactions()); j++ {
-			tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
-			hooks[j] = tracerSlice[j].Hooks
+		var (
+			tracerSlice []*tracers.Tracer = nil
+			hooks       []*tracing.Hooks  = nil
+		)
+		if tracecache.Enabled() {
+			tracerSlice = make([]*tracers.Tracer, len(block.Transactions()))
+			hooks = make([]*tracing.Hooks, len(block.Transactions()))
+			for j := 0; j < len(block.Transactions()); j++ {
+				tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
+				hooks[j] = tracerSlice[j].Hooks
+			}
 		}
 		if _, err = d.blockchain.InsertChainWithHooks([]*types.Block{block}, hooks); err != nil {
 			index = i
 			break
-		} else {
+		} else if tracecache.Enabled() {
 			traceResults := make([]txTraceResult, 0, len(tracerSlice))
 			for j, tracer := range tracerSlice {
 				traceResult, err := tracer.GetResult()
