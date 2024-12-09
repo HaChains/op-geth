@@ -28,6 +28,7 @@ type redisCache struct {
 	ch chan kv
 }
 
+var enabled bool
 var rc *redisCache
 var (
 	untilStart chan struct{}
@@ -66,11 +67,19 @@ func (c *redisCache) loop() {
 	}
 }
 
+func Enabled() bool {
+	return enabled
+}
 func Started() bool {
 	return rc != nil
 }
 
 func Start(ctx context.Context) {
+	enabled = env.LoadEnvBool(env.EnvTraceCacheEnabled)
+	if !enabled {
+		log.Info("### DEBUG ### [tracecache.Start] trace cache is not enabled")
+		return
+	}
 	if Started() {
 		return
 	}
@@ -152,6 +161,10 @@ var (
 )
 
 func Write(blockNumber int64, traceResult []byte) {
+	if !enabled {
+		log.Info("### DEBUG ### [rediscache.Write] trace cache is not enabled")
+		return
+	}
 	if !Started() {
 		log.Info("### DEBUG ### [rediscache.Write] write before service start", "blockNumber", blockNumber)
 		log.Info("### DEBUG ### [rediscache.Write] wait until start")

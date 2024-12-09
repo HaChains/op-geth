@@ -654,11 +654,17 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 	}
 	log.Trace("Inserting block without sethead", "hash", block.Hash(), "number", block.Number())
 
-	tracerSlice := make([]*tracers.Tracer, len(block.Transactions()))
-	hooks := make([]*tracing.Hooks, len(block.Transactions()))
-	for j := 0; j < len(block.Transactions()); j++ {
-		tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
-		hooks[j] = tracerSlice[j].Hooks
+	var (
+		tracerSlice []*tracers.Tracer = nil
+		hooks       []*tracing.Hooks  = nil
+	)
+	if tracecache.Enabled() {
+		tracerSlice = make([]*tracers.Tracer, len(block.Transactions()))
+		hooks = make([]*tracing.Hooks, len(block.Transactions()))
+		for j := 0; j < len(block.Transactions()); j++ {
+			tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
+			hooks[j] = tracerSlice[j].Hooks
+		}
 	}
 	if err := api.eth.BlockChain().InsertBlockWithoutSetHeadWithHooks(block, hooks); err != nil {
 		log.Warn("NewPayloadV1: inserting block failed", "error", err)
@@ -669,7 +675,7 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 		api.invalidLock.Unlock()
 
 		return api.invalid(err, parent.Header()), nil
-	} else {
+	} else if tracecache.Enabled() {
 		prepareTokens <- struct{}{}
 		go PrepareTraceResults(tracerSlice, block)
 	}
