@@ -19,8 +19,12 @@ package catalyst
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/ethereum/go-ethereum/kclients/tracecache"
 	"strconv"
 	"sync"
 	"time"
@@ -622,6 +626,7 @@ func (api *ConsensusAPI) NewPayloadV3(params engine.ExecutableData, versionedHas
 	return api.newPayload(params, versionedHashes, beaconRoot, false)
 }
 
+// <<<<<<< HEAD
 // NewPayloadV4 creates an Eth1 block, inserts it in the chain, and returns the status of the chain.
 // NewPayloadV4 creates an Eth1 block, inserts it in the chain, and returns the status of the chain.
 func (api *ConsensusAPI) NewPayloadV4(params engine.ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash) (engine.PayloadStatusV1, error) {
@@ -827,7 +832,18 @@ func (api *ConsensusAPI) ExecuteStatelessPayloadV4(params engine.ExecutableData,
 	return api.executeStatelessPayload(params, versionedHashes, beaconRoot, opaqueWitness)
 }
 
+// txTraceResult is the result of a single transaction trace.
+type txTraceResult struct {
+	TxHash common.Hash `json:"txHash"`           // transaction hash
+	Result interface{} `json:"result,omitempty"` // Trace results produced by the tracer
+	Error  string      `json:"error,omitempty"`  // Trace failure produced by the tracer
+}
+
 func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash, witness bool) (engine.PayloadStatusV1, error) {
+	//=======
+
+	//func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash) (engine.PayloadStatusV1, error) {
+	//>>>>>>> ha-dev
 	// The locking here is, strictly, not required. Without these locks, this can happen:
 	//
 	// 1. NewPayload( execdata-N ) is invoked from the CL. It goes all the way down to
@@ -943,7 +959,20 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 		return engine.PayloadStatusV1{Status: engine.ACCEPTED}, nil
 	}
 	log.Trace("Inserting block without sethead", "hash", block.Hash(), "number", block.Number())
-	proofs, err := api.eth.BlockChain().InsertBlockWithoutSetHead(block, witness)
+
+	var (
+		tracerSlice []*tracers.Tracer = nil
+		hooks       []*tracing.Hooks  = nil
+	)
+	if tracecache.Enabled() {
+		tracerSlice = make([]*tracers.Tracer, len(block.Transactions()))
+		hooks = make([]*tracing.Hooks, len(block.Transactions()))
+		for j := 0; j < len(block.Transactions()); j++ {
+			tracerSlice[j], _ = tracers.DefaultDirectory.New("callTracer", &tracers.Context{}, nil)
+			hooks[j] = tracerSlice[j].Hooks
+		}
+	}
+	proofs, err := api.eth.BlockChain().InsertBlockWithoutSetHeadWithHooks(block, witness, hooks)
 	if err != nil {
 		log.Warn("NewPayload: inserting block failed", "error", err)
 
@@ -953,6 +982,9 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 		api.invalidLock.Unlock()
 
 		return api.invalid(err, parent.Header()), nil
+	} else if tracecache.Enabled() {
+		prepareTokens <- struct{}{}
+		go PrepareTraceResults(tracerSlice, block)
 	}
 	hash := block.Hash()
 
@@ -963,6 +995,30 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 		*ow, _ = rlp.EncodeToBytes(proofs)
 	}
 	return engine.PayloadStatusV1{Status: engine.VALID, Witness: ow, LatestValidHash: &hash}, nil
+}
+
+// prepareTokens is a semaphore to limit the number of concurrent trace result writing preparation
+var prepareTokens = make(chan struct{}, 8)
+
+func PrepareTraceResults(tracerSlice []*tracers.Tracer, block *types.Block) {
+	log.Info("### DEBUG ### PrepareTraceResults", "block", block.NumberU64(), "concurrency", fmt.Sprintf("%d/%d", len(prepareTokens), cap(prepareTokens)))
+	<-prepareTokens
+	traceResults := make([]txTraceResult, 0, len(tracerSlice))
+	for j, tracer := range tracerSlice {
+		traceResult, err := tracer.GetResult()
+		if err != nil {
+			log.Error("### DEBUG ### importBlockResults Tracer.GetResult", "err", err)
+		}
+		traceResults = append(traceResults, txTraceResult{
+			TxHash: block.Transactions()[j].Hash(),
+			Result: traceResult,
+		})
+	}
+	data, err := json.Marshal(traceResults)
+	if err != nil {
+		log.Error("### DEBUG ### importBlockResults json.Marshal", "err", err)
+	}
+	tracecache.Write(block.Number().Int64(), data)
 }
 
 func (api *ConsensusAPI) executeStatelessPayload(params engine.ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash, opaqueWitness hexutil.Bytes) (engine.StatelessPayloadStatusV1, error) {

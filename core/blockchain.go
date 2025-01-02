@@ -18,6 +18,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,8 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
 	"github.com/ethereum/go-ethereum/internal/version"
+	"github.com/ethereum/go-ethereum/kclients/pause"
+	"github.com/ethereum/go-ethereum/kclients/tracecache"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
@@ -265,6 +268,8 @@ type BlockChain struct {
 // available in the database. It initialises the default Ethereum Validator
 // and Processor.
 func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis, overrides *ChainOverrides, engine consensus.Engine, vmConfig vm.Config, txLookupLimit *uint64) (*BlockChain, error) {
+	tracecache.Start(context.Background())
+	pause.Start()
 	if cacheConfig == nil {
 		cacheConfig = defaultCacheConfig
 	}
@@ -1111,6 +1116,7 @@ func (bc *BlockChain) stopWithoutSaving() {
 // Stop stops the blockchain service. If any imports are currently in progress
 // it will abort them using the procInterrupt.
 func (bc *BlockChain) Stop() {
+	pause.Stop()
 	bc.stopWithoutSaving()
 
 	// Ensure that the entirety of the state snapshot is journaled to disk.
@@ -1169,6 +1175,7 @@ func (bc *BlockChain) Stop() {
 		log.Error("Failed to close trie database", "err", err)
 	}
 	log.Info("Blockchain stopped")
+	tracecache.Stop()
 }
 
 // StopInsert interrupts all insertion methods, causing them to return
@@ -1577,6 +1584,11 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 // the index number of the failing block as well an error describing what went
 // wrong. After insertion is done, all accumulated events will be fired.
 func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
+	return bc.InsertChainWithHooks(chain, nil)
+}
+
+// InsertChainWithHooks 每次只塞了一个块，所以hooks是一维的
+func (bc *BlockChain) InsertChainWithHooks(chain types.Blocks, hooks []*tracing.Hooks) (int, error) {
 	// Sanity check that we have something meaningful to import
 	if len(chain) == 0 {
 		return 0, nil
@@ -1604,8 +1616,7 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 		return 0, errChainStopped
 	}
 	defer bc.chainmu.Unlock()
-
-	_, n, err := bc.insertChain(chain, true, false) // No witness collection for mass inserts (would get super large)
+	_, n, err := bc.insertChain(chain, true, false, hooks) // No witness collection for mass inserts (would get super large)
 	return n, err
 }
 
@@ -1617,7 +1628,7 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 // racey behaviour. If a sidechain import is in progress, and the historic state
 // is imported, but then new canon-head is added before the actual sidechain
 // completes, then the historic state could be pruned again
-func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool, makeWitness bool) (*stateless.Witness, int, error) {
+func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool, makeWitness bool, hooks []*tracing.Hooks) (*stateless.Witness, int, error) {
 	// If the chain is terminating, don't even bother starting up.
 	if bc.insertStopped() {
 		return nil, 0, nil
@@ -1821,8 +1832,13 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool, makeWitness 
 			}
 		}
 
+		if pause.RedisBehind(block.Number().Int64()) {
+			if shutdown := pause.PauseIfBehind("[BlockChain.insertChain]"); shutdown {
+				return nil, it.index, errors.New("### DEBUG ### err pause service exit")
+			}
+		}
 		// The traced section of block import.
-		res, err := bc.processBlock(block, statedb, start, setHead)
+		res, err := bc.processBlock(block, statedb, start, setHead, hooks)
 		followupInterrupt.Store(true)
 		if err != nil {
 			return nil, it.index, err
@@ -1885,7 +1901,7 @@ type blockProcessingResult struct {
 
 // processBlock executes and validates the given block. If there was no error
 // it writes the block and associated state to database.
-func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, start time.Time, setHead bool) (_ *blockProcessingResult, blockEndErr error) {
+func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, start time.Time, setHead bool, hooks []*tracing.Hooks) (_ *blockProcessingResult, blockEndErr error) {
 	if bc.logger != nil && bc.logger.OnBlockStart != nil {
 		td := bc.GetTd(block.ParentHash(), block.NumberU64()-1)
 		bc.logger.OnBlockStart(tracing.BlockEvent{
@@ -1903,7 +1919,7 @@ func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, s
 
 	// Process block using the parent state as reference point
 	pstart := time.Now()
-	res, err := bc.processor.Process(block, statedb, bc.vmConfig)
+	res, err := bc.processor.ProcessWithHooks(block, statedb, bc.vmConfig, hooks)
 	if err != nil {
 		bc.reportBlock(block, res, err)
 		return nil, err
@@ -2092,7 +2108,7 @@ func (bc *BlockChain) insertSideChain(block *types.Block, it *insertIterator, ma
 		// memory here.
 		if len(blocks) >= 2048 || memory > 64*1024*1024 {
 			log.Info("Importing heavy sidechain segment", "blocks", len(blocks), "start", blocks[0].NumberU64(), "end", block.NumberU64())
-			if _, _, err := bc.insertChain(blocks, true, false); err != nil {
+			if _, _, err := bc.insertChain(blocks, true, false, nil); err != nil {
 				return nil, 0, err
 			}
 			blocks, memory = blocks[:0], 0
@@ -2106,7 +2122,7 @@ func (bc *BlockChain) insertSideChain(block *types.Block, it *insertIterator, ma
 	}
 	if len(blocks) > 0 {
 		log.Info("Importing sidechain segment", "start", blocks[0].NumberU64(), "end", blocks[len(blocks)-1].NumberU64())
-		return bc.insertChain(blocks, true, makeWitness)
+		return bc.insertChain(blocks, true, makeWitness, nil)
 	}
 	return nil, 0, nil
 }
@@ -2155,7 +2171,7 @@ func (bc *BlockChain) recoverAncestors(block *types.Block, makeWitness bool) (co
 		} else {
 			b = bc.GetBlock(hashes[i], numbers[i])
 		}
-		if _, _, err := bc.insertChain(types.Blocks{b}, false, makeWitness && i == 0); err != nil {
+		if _, _, err := bc.insertChain(types.Blocks{b}, false, makeWitness && i == 0, nil); err != nil {
 			return b.ParentHash(), err
 		}
 	}
@@ -2366,19 +2382,23 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Block) error {
 	return nil
 }
 
+func (bc *BlockChain) InsertBlockWithoutSetHeadWithHooks(block *types.Block, makeWitness bool, hooks []*tracing.Hooks) (*stateless.Witness, error) {
+	if !bc.chainmu.TryLock() {
+		return nil, errChainStopped
+	}
+	defer bc.chainmu.Unlock()
+
+	witness, _, err := bc.insertChain(types.Blocks{block}, false, makeWitness, hooks)
+	return witness, err
+}
+
 // InsertBlockWithoutSetHead executes the block, runs the necessary verification
 // upon it and then persist the block and the associate state into the database.
 // The key difference between the InsertChain is it won't do the canonical chain
 // updating. It relies on the additional SetCanonical call to finalize the entire
 // procedure.
 func (bc *BlockChain) InsertBlockWithoutSetHead(block *types.Block, makeWitness bool) (*stateless.Witness, error) {
-	if !bc.chainmu.TryLock() {
-		return nil, errChainStopped
-	}
-	defer bc.chainmu.Unlock()
-
-	witness, _, err := bc.insertChain(types.Blocks{block}, false, makeWitness)
-	return witness, err
+	return bc.InsertBlockWithoutSetHeadWithHooks(block, makeWitness, nil)
 }
 
 // SetCanonical rewinds the chain to set the new head block as the specified
