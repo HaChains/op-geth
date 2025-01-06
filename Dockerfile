@@ -4,7 +4,8 @@ ARG VERSION=""
 ARG BUILDNUM=""
 
 # Build Geth in a stock Go builder container
-FROM golang:1.22-alpine as builder
+FROM golang:1.23-alpine AS builder
+
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories
 RUN apk add --no-cache gcc musl-dev linux-headers git
 
