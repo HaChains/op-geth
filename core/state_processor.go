@@ -55,6 +55,10 @@ func NewStateProcessor(config *params.ChainConfig, chain *HeaderChain) *StatePro
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*ProcessResult, error) {
+	return p.ProcessWithHooks(block, statedb, cfg, nil)
+}
+
+func (p *StateProcessor) ProcessWithHooks(block *types.Block, statedb *state.StateDB, cfg vm.Config, hooks []*tracing.Hooks) (*ProcessResult, error) {
 	var (
 		receipts    types.Receipts
 		usedGas     = new(uint64)
@@ -91,6 +95,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		if hooks != nil {
+			evm.Config.Tracer = hooks[i]
+		}
 		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
 		if err != nil {
 			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)

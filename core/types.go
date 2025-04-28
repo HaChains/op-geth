@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 )
@@ -49,6 +50,7 @@ type Processor interface {
 	// the transaction messages using the statedb and applying any rewards to both
 	// the processor (coinbase) and any included uncles.
 	Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*ProcessResult, error)
+	ProcessWithHooks(block *types.Block, statedb *state.StateDB, cfg vm.Config, hooks []*tracing.Hooks) (*ProcessResult, error)
 }
 
 // ProcessResult contains the values computed by Process.
